@@ -38,6 +38,7 @@
 
 #include <openssl/x509v3.h>
 #include <ctype.h>
+#include <fcntl.h>
 
 #include "attrs.h"
 #include "base.h"
@@ -1568,6 +1569,34 @@ static void session_init(fr_tls_session_t *session)
 	session->opaque = NULL;
 }
 
+#define FIRSTLINE   "# SSL key logfile generated inside tls.c\n"
+#define FIRSTLINE_LEN (sizeof(FIRSTLINE) - 1)
+
+int keylog_file_fd = -1;
+static void init_keylog_file(void)
+{
+    if (keylog_file_fd >= 0)
+        return;
+
+    const char *filename = getenv("SSLKEYLOGFILE");
+    if (filename) {
+        keylog_file_fd = open(filename, O_WRONLY | O_APPEND | O_CREAT, 0600);
+        if (keylog_file_fd >= 0 && lseek(keylog_file_fd, 0, SEEK_END) == 0) {
+            /* file is opened successfully and there is no data (pos == 0) */
+            write(keylog_file_fd, FIRSTLINE, FIRSTLINE_LEN);
+        }
+    }
+}
+
+static void keylog_callback(const SSL *ssl, const char *line)
+{
+    init_keylog_file();
+    if (keylog_file_fd >= 0) {
+        write(keylog_file_fd, line, strlen(line));
+        write(keylog_file_fd, "\n", 1);
+    }
+}
+
 /** Create a new client TLS session
  *
  * Configures a new client TLS session, configuring options, setting callbacks etc...
@@ -1595,6 +1624,7 @@ fr_tls_session_t *fr_tls_session_init_client(TALLOC_CTX *ctx, fr_tls_conf_t *con
 	fr_assert(session->ctx);
 
 	session->ssl = SSL_new(session->ctx);
+    SSL_CTX_set_keylog_callback(ctx, &keylog_callback);
 	if (!session->ssl) {
 		talloc_free(session);
 		return NULL;
@@ -1669,6 +1699,7 @@ fr_tls_session_t *fr_tls_session_init_server(TALLOC_CTX *ctx, fr_tls_conf_t *con
 	fr_assert(ssl_ctx);
 
 	new_tls = SSL_new(ssl_ctx);
+    SSL_CTX_set_keylog_callback(ctx, &keylog_callback);
 	if (new_tls == NULL) {
 		fr_tls_log_error(request, "Error creating new TLS session");
 		return NULL;
